@@ -38,3 +38,5 @@ fairy_pink@420 = palettes/fairy_pink.png
 PNG strips must be exactly **16 pixels wide and 1 pixel tall**. Each pixel becomes one palette color, read from left to right.
 
 Palette row IDs are assigned automatically if not specified. When assigning an explicit row for your palettes, make sure each row ID is a unique number between **256 and 1024**.
+
+NOTE: Right now you just have to pick a number that you think is unique enough to avoid conflictions with any mods. In the future, perhaps I will update the mod so that it will dynamically avoid any potential conflictions, but this is so niche right now that I'm not going to bother. At least not until a proper in-general cat framework is complete/provided!
