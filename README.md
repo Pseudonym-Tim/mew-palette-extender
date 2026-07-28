@@ -7,6 +7,14 @@ A DLL dependency mod that allows other mods to add new custom color palettes to 
 
 To make a palette mod, install **MewPaletteExtender** once, then create your own mod folder next to it.
 
+First, please ensure that in your description.json of your mod, that you require this mod as a dependancy:
+
+```text
+"requirements": [
+    "MewPaletteExtender>=1.1.0"
+  ]
+```
+
 Your palette mod should include a `palette_rows.txt` file and, optionally, a `palettes` folder for PNG palette strips.
 
 Here's how the file layout should look:
@@ -16,6 +24,8 @@ mods/
   MewPaletteExtender/
     MewPaletteExtender.dll
   YourPaletteMod/
+    description.json
+    preview.png
     palette_rows.txt
     palettes/
       fairy_pink.png
