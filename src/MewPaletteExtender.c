@@ -1,4 +1,5 @@
 #include "MewPaletteExtender.h"
+#include <string.h>
 #include "mewjector.h"
 
 #include <ctype.h>
@@ -7,9 +8,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <windows.h>
 #include <objbase.h>
+#include <initguid.h>
 #include <wincodec.h>
 
 static const bool ENABLE_DEBUG_LOGS = true;
@@ -17,25 +18,34 @@ static const bool ENABLE_DEBUG_LOGS = true;
 typedef struct PaletteRow
 {
     char id[128];
+    char sourcePath[MAX_PATH_LENGTH];
     uint8_t rgba[PALETTE_WIDTH][4];
+    int32_t preferredRowIndex;
     int32_t rowIndex;
 } PaletteRow;
 
 typedef uint8_t* (__fastcall *fn_image_decode_from_memory)(void* streamRange, int32_t* width, int32_t* height, int32_t* channels, int32_t requestedChannels);
+typedef void* (__fastcall *fn_gon_index_by_name)(void* gonObject, const void* fieldName);
 typedef void* (__fastcall *fn_game_malloc)(size_t size);
 typedef void (__fastcall *fn_game_free)(void* ptr);
 
 static MewjectorAPI g_mj;
 static fn_image_decode_from_memory g_origImageDecodeFromMemory = NULL;
+static fn_gon_index_by_name g_origGonIndexByNameConst = NULL;
+static fn_gon_index_by_name g_origGonIndexByName = NULL;
 static fn_game_malloc g_gameMalloc = NULL;
 static fn_game_free g_gameFree = NULL;
 static PaletteRow g_rows[MAX_CUSTOM_ROWS];
 static int32_t g_rowCount = 0;
-static int32_t g_requiredHeight = VANILLA_PALETTE_ROWS;
+static int32_t g_paletteBaseHeight = 0;
+static int32_t g_requiredHeight = 0;
 static volatile LONG g_loadedRows = 0;
+static volatile LONG g_finalizedRows = 0;
 static volatile LONG g_runtimeInstalled = 0;
 static volatile LONG g_decodeLogCount = 0;
 static HMODULE g_moduleHandle = NULL;
+
+static int IsValidPaletteId(const char* id);
 
 static void Log(const char* fmt, ...)
 {
@@ -468,38 +478,50 @@ static int LoadPngPaletteStrip(const char* path, uint8_t outRgba[PALETTE_WIDTH][
     return SUCCEEDED(hr);
 }
 
-static int IsRowIndexTaken(int32_t rowIndex)
+static int ComparePaletteRows(const void* leftValue, const void* rightValue)
 {
-    int32_t i;
+    const PaletteRow* left;
+    const PaletteRow* right;
+    int comparison;
 
-    for (i = 0; i < g_rowCount; ++i)
+    left = (const PaletteRow*)leftValue;
+    right = (const PaletteRow*)rightValue;
+    comparison = _stricmp(left->id, right->id);
+
+    if (comparison != 0)
     {
-        if (g_rows[i].rowIndex == rowIndex)
-        {
-            return 1;
-        }
+        return comparison;
     }
 
-    return 0;
+    comparison = _stricmp(left->sourcePath, right->sourcePath);
+
+    if (comparison != 0)
+    {
+        return comparison;
+    }
+
+    comparison = strcmp(left->sourcePath, right->sourcePath);
+
+    if (comparison != 0)
+    {
+        return comparison;
+    }
+
+    if (left->preferredRowIndex != right->preferredRowIndex)
+    {
+        return left->preferredRowIndex < right->preferredRowIndex ? -1 : 1;
+    }
+
+    return memcmp(left->rgba, right->rgba, sizeof(left->rgba));
 }
 
-static int AddPaletteRow(const char* id, int32_t explicitRowIndex, const uint8_t rgba[PALETTE_WIDTH][4])
+static int CollectPaletteRow(const char* id, int32_t preferredRowIndex, const uint8_t rgba[PALETTE_WIDTH][4], const char* sourcePath)
 {
     PaletteRow* row;
-    int32_t i;
 
-    if (!id || !rgba)
+    if (!id || !rgba || !sourcePath)
     {
         return 0;
-    }
-
-    for (i = 0; i < g_rowCount; ++i)
-    {
-        if (_stricmp(g_rows[i].id, id) == 0)
-        {
-            Log("Duplicate palette id ignored: %s", id);
-            return 0;
-        }
     }
 
     if (g_rowCount >= MAX_CUSTOM_ROWS)
@@ -511,48 +533,155 @@ static int AddPaletteRow(const char* id, int32_t explicitRowIndex, const uint8_t
     row = &g_rows[g_rowCount];
     memset(row, 0, sizeof(*row));
     strncpy(row->id, id, sizeof(row->id) - 1U);
+    strncpy(row->sourcePath, sourcePath, sizeof(row->sourcePath) - 1U);
     memcpy(row->rgba, rgba, sizeof(row->rgba));
-
-    if (explicitRowIndex >= PALETTE_FIRST_CUSTOM_ROW)
-    {
-        if (explicitRowIndex >= MAX_EXTENDED_PALETTE_ROWS)
-        {
-            Log("Explicit palette row out of safe range ignored: id=%s row=%d maxExclusive=%d", id, explicitRowIndex, MAX_EXTENDED_PALETTE_ROWS);
-            return 0;
-        }
-
-        if (IsRowIndexTaken(explicitRowIndex))
-        {
-            Log("Explicit palette row collision ignored: id=%s row=%d", id, explicitRowIndex);
-            return 0;
-        }
-
-        row->rowIndex = explicitRowIndex;
-    }
-    else
-    {
-        row->rowIndex = PALETTE_FIRST_CUSTOM_ROW + g_rowCount;
-
-        while (row->rowIndex < MAX_EXTENDED_PALETTE_ROWS && IsRowIndexTaken(row->rowIndex))
-        {
-            ++row->rowIndex;
-        }
-    }
-
-    if (row->rowIndex < PALETTE_FIRST_CUSTOM_ROW || row->rowIndex >= MAX_EXTENDED_PALETTE_ROWS)
-    {
-        Log("Could not allocate compact row for palette id=%s", id);
-        return 0;
-    }
-
-    if ((row->rowIndex + 1) > g_requiredHeight)
-    {
-        g_requiredHeight = row->rowIndex + 1;
-    }
-
-    Log("Registered palette row: %s => %d", row->id, row->rowIndex);
+    row->preferredRowIndex = preferredRowIndex;
+    row->rowIndex = -1;
     ++g_rowCount;
     return 1;
+}
+
+static uint32_t HashPaletteId(const char* id)
+{
+    uint32_t hash;
+
+    hash = 2166136261U;
+
+    while (*id)
+    {
+        hash ^= (uint32_t)(unsigned char)tolower((unsigned char)*id);
+        hash *= 16777619U;
+        ++id;
+    }
+
+    return hash;
+}
+
+static void FinalizePaletteRows(int32_t paletteBaseHeight)
+{
+    uint8_t occupied[MAX_CUSTOM_ROWS];
+    int32_t readIndex;
+    int32_t uniqueCount;
+
+    if (g_rowCount <= 0)
+    {
+        return;
+    }
+
+    qsort(g_rows, (size_t)g_rowCount, sizeof(g_rows[0]), ComparePaletteRows);
+    uniqueCount = 0;
+
+    for (readIndex = 0; readIndex < g_rowCount; ++readIndex)
+    {
+        PaletteRow* candidate;
+
+        candidate = &g_rows[readIndex];
+
+        if (uniqueCount > 0 && _stricmp(g_rows[uniqueCount - 1].id, candidate->id) == 0)
+        {
+            PaletteRow* selected;
+            int sameDefinition;
+
+            selected = &g_rows[uniqueCount - 1];
+            sameDefinition = selected->preferredRowIndex == candidate->preferredRowIndex && memcmp(selected->rgba, candidate->rgba, sizeof(selected->rgba)) == 0;
+
+            if (sameDefinition)
+            {
+                Log("Duplicate palette id has the same definition!!! Using %s and ignoring %s: %s", selected->sourcePath, candidate->sourcePath, selected->id);
+            }
+            else
+            {
+                Log("Conflicting palette id!!! Deterministic winner is %s and ignored definition is %s: %s", selected->sourcePath, candidate->sourcePath, selected->id);
+            }
+
+            continue;
+        }
+
+        if (uniqueCount != readIndex)
+        {
+            g_rows[uniqueCount] = *candidate;
+        }
+
+        ++uniqueCount;
+    }
+
+    g_rowCount = uniqueCount;
+    memset(occupied, 0, sizeof(occupied));
+    g_paletteBaseHeight = paletteBaseHeight;
+    g_requiredHeight = paletteBaseHeight;
+
+    for (readIndex = 0; readIndex < g_rowCount; ++readIndex)
+    {
+        PaletteRow* row;
+        int32_t preferredOffset;
+
+        row = &g_rows[readIndex];
+        row->rowIndex = -1;
+
+        if (row->preferredRowIndex < 0)
+        {
+            continue;
+        }
+
+        if (row->preferredRowIndex < paletteBaseHeight || row->preferredRowIndex >= paletteBaseHeight + MAX_CUSTOM_ROWS)
+        {
+            Log("Preferred palette row is outside %d-%d and will be assigned automatically: %s requested=%d", paletteBaseHeight, paletteBaseHeight + MAX_CUSTOM_ROWS - 1, row->id, row->preferredRowIndex);
+            continue;
+        }
+
+        preferredOffset = row->preferredRowIndex - paletteBaseHeight;
+
+        if (occupied[preferredOffset])
+        {
+            Log("Preferred palette row collision!!! Assigning this id automatically: %s requested=%d", row->id, row->preferredRowIndex);
+            continue;
+        }
+
+        occupied[preferredOffset] = 1U;
+        row->rowIndex = row->preferredRowIndex;
+    }
+
+    for (readIndex = 0; readIndex < g_rowCount; ++readIndex)
+    {
+        PaletteRow* row;
+
+        row = &g_rows[readIndex];
+
+        if (row->rowIndex < 0)
+        {
+            uint32_t startOffset;
+            int32_t probe;
+
+            startOffset = HashPaletteId(row->id) % MAX_CUSTOM_ROWS;
+
+            for (probe = 0; probe < MAX_CUSTOM_ROWS; ++probe)
+            {
+                int32_t rowOffset;
+
+                rowOffset = (int32_t)((startOffset + (uint32_t)probe) % MAX_CUSTOM_ROWS);
+
+                if (!occupied[rowOffset])
+                {
+                    row->rowIndex = paletteBaseHeight + rowOffset;
+                    occupied[rowOffset] = 1U;
+                    break;
+                }
+            }
+
+            if (row->rowIndex < 0)
+            {
+                Log("Could not allocate deterministic row for palette id=%s", row->id);
+                continue;
+            }
+        }
+
+        if ((row->rowIndex + 1) > g_requiredHeight)
+        {
+            g_requiredHeight = row->rowIndex + 1;
+        }
+
+        Log("Registered palette row: @%s => %d source=%s", row->id, row->rowIndex, row->sourcePath);
+    }
 }
 
 static int ParsePaletteLine(char* line, const char* manifestPath)
@@ -627,7 +756,7 @@ static int ParsePaletteLine(char* line, const char* manifestPath)
             return 0;
         }
 
-        return AddPaletteRow(id, explicitRowIndex, rgba);
+        return CollectPaletteRow(id, explicitRowIndex, rgba, manifestPath);
     }
 
     context = NULL;
@@ -648,11 +777,11 @@ static int ParsePaletteLine(char* line, const char* manifestPath)
 
     if (colorIndex != PALETTE_WIDTH)
     {
-        Log("Palette %s has %d colors; expected %d", id, colorIndex, PALETTE_WIDTH);
+        Log("Palette %s has %d colors, expected %d", id, colorIndex, PALETTE_WIDTH);
         return 0;
     }
 
-    return AddPaletteRow(id, explicitRowIndex, rgba);
+    return CollectPaletteRow(id, explicitRowIndex, rgba, manifestPath);
 }
 
 static void LoadPaletteRowsFile(const char* path)
@@ -832,13 +961,279 @@ static void LoadPaletteRowsFromSiblingModDirectories(void)
 
 static void EnsurePaletteRowsLoaded(void)
 {
-    if (InterlockedCompareExchange(&g_loadedRows, 1, 0) != 0)
+    LONG previousState;
+
+    previousState = InterlockedCompareExchange(&g_loadedRows, 1, 0);
+
+    if (previousState == 0)
+    {
+        LoadPaletteRowsFromDllDirectory();
+        LoadPaletteRowsFromSiblingModDirectories();
+        MemoryBarrier();
+        InterlockedExchange(&g_loadedRows, 2);
+        Log("Palette definition scan complete: definitions=%d", g_rowCount);
+        return;
+    }
+
+    while (InterlockedCompareExchange(&g_loadedRows, 2, 2) == 1)
+    {
+        Sleep(0);
+    }
+}
+
+static int EnsurePaletteRowsFinalized(int32_t paletteBaseHeight)
+{
+    LONG previousState;
+
+    if (paletteBaseHeight < MIN_PALETTE_TEXTURE_ROWS)
+    {
+        return 0;
+    }
+
+    EnsurePaletteRowsLoaded();
+    previousState = InterlockedCompareExchange(&g_finalizedRows, 1, 0);
+
+    if (previousState == 0)
+    {
+        FinalizePaletteRows(paletteBaseHeight);
+        MemoryBarrier();
+        InterlockedExchange(&g_finalizedRows, 2);
+        Log("Palette rows finalized from decoded texture height: baseHeight=%d rows=%d requiredHeight=%d", g_paletteBaseHeight, g_rowCount, g_requiredHeight);
+        return 1;
+    }
+
+    while (InterlockedCompareExchange(&g_finalizedRows, 2, 2) == 1)
+    {
+        Sleep(0);
+    }
+
+    if (g_paletteBaseHeight != paletteBaseHeight)
+    {
+        Log("Ignoring another 16-pixel-wide image after palette allocation: detectedHeight=%d paletteBaseHeight=%d", paletteBaseHeight, g_paletteBaseHeight);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int GetMsvcStringView(const void* stringObject, const char** text, size_t* length)
+{
+    const uint8_t* bytes;
+    size_t stringLength;
+    size_t capacity;
+    const char* stringData;
+
+    if (!stringObject || !text || !length)
+    {
+        return 0;
+    }
+
+    bytes = (const uint8_t*)stringObject;
+    memcpy(&stringLength, bytes + MSVC_STRING_SIZE_OFFSET, sizeof(stringLength));
+    memcpy(&capacity, bytes + MSVC_STRING_CAPACITY_OFFSET, sizeof(capacity));
+
+    if (stringLength > MAX_GON_STRING_LENGTH || capacity < stringLength)
+    {
+        return 0;
+    }
+
+    if (capacity <= MSVC_STRING_SSO_CAPACITY)
+    {
+        stringData = (const char*)bytes;
+    }
+    else
+    {
+        memcpy(&stringData, bytes, sizeof(stringData));
+    }
+
+    if (!stringData)
+    {
+        return 0;
+    }
+
+    *text = stringData;
+    *length = stringLength;
+    return 1;
+}
+
+static int MsvcStringEqualsLiteral(const void* stringObject, const char* literal)
+{
+    const char* text;
+    size_t length;
+    size_t literalLength;
+
+    if (!literal || !GetMsvcStringView(stringObject, &text, &length))
+    {
+        return 0;
+    }
+
+    literalLength = strlen(literal);
+    return length == literalLength && memcmp(text, literal, length) == 0;
+}
+
+static PaletteRow* FindPaletteRowById(const char* id)
+{
+    int32_t index;
+
+    for (index = 0; index < g_rowCount; ++index)
+    {
+        if (_stricmp(g_rows[index].id, id) == 0)
+        {
+            return &g_rows[index];
+        }
+    }
+
+    return NULL;
+}
+
+__declspec(dllexport) int __cdecl
+MewPaletteExtender_ResolvePalette(const char* id, int32_t* resolvedRow)
+{
+    PaletteRow* row;
+
+    if (!id || !resolvedRow)
+    {
+        return 0;
+    }
+
+    if (*id == '@')
+    {
+        ++id;
+    }
+
+    if (!IsValidPaletteId(id))
+    {
+        return 0;
+    }
+
+    EnsurePaletteRowsLoaded();
+
+    if (InterlockedCompareExchange(&g_finalizedRows, 2, 2) != 2)
+    {
+        return 0;
+    }
+
+    row = FindPaletteRowById(id);
+
+    if (!row || row->rowIndex < g_paletteBaseHeight)
+    {
+        return 0;
+    }
+
+    *resolvedRow = row->rowIndex;
+    return 1;
+}
+
+static int IsValidPaletteId(const char* id)
+{
+    const unsigned char* cursor;
+
+    if (!id || id[0] == '\0')
+    {
+        return 0;
+    }
+
+    cursor = (const unsigned char*)id;
+
+    while (*cursor)
+    {
+        if (!isalnum(*cursor) && *cursor != '_' && *cursor != '-' && *cursor != '.')
+        {
+            return 0;
+        }
+
+        ++cursor;
+    }
+
+    return 1;
+}
+
+static void MaybeResolveNamedPalette(void* paletteField)
+{
+    uint8_t* fieldBytes;
+    int32_t fieldType;
+    const char* token;
+    size_t tokenLength;
+    char id[128];
+    PaletteRow* row;
+    int32_t rowIndex;
+    double rowAsDouble;
+
+    if (!paletteField)
     {
         return;
     }
 
-    LoadPaletteRowsFromSiblingModDirectories();
-    Log("Palette row scan complete: rows=%d requiredHeight=%d", g_rowCount, g_requiredHeight);
+    fieldBytes = (uint8_t*)paletteField;
+    memcpy(&fieldType, fieldBytes + GON_TYPE_OFFSET, sizeof(fieldType));
+
+    if (fieldType != GON_TYPE_STRING || !GetMsvcStringView(fieldBytes + GON_STRING_DATA_OFFSET, &token, &tokenLength) || tokenLength < 2U || tokenLength >= sizeof(id) || token[0] != '@')
+    {
+        return;
+    }
+
+    memcpy(id, token + 1, tokenLength - 1U);
+    id[tokenLength - 1U] = '\0';
+
+    if (!IsValidPaletteId(id))
+    {
+        Log("Invalid named palette reference: %.*s", (int)tokenLength, token);
+        return;
+    }
+
+    EnsurePaletteRowsLoaded();
+
+    if (InterlockedCompareExchange(&g_finalizedRows, 2, 2) != 2)
+    {
+        Log("Named palette requested before the palette texture height was detected: @%s", id);
+        return;
+    }
+
+    row = FindPaletteRowById(id);
+
+    if (!row || row->rowIndex < g_paletteBaseHeight)
+    {
+        Log("Unknown named palette reference: @%s", id);
+        return;
+    }
+
+    rowIndex = row->rowIndex;
+    rowAsDouble = (double)rowIndex;
+    memcpy(fieldBytes + GON_INT_DATA_OFFSET, &rowIndex, sizeof(rowIndex));
+    memcpy(fieldBytes + GON_FLOAT_DATA_OFFSET, &rowAsDouble, sizeof(rowAsDouble));
+    MemoryBarrier();
+    fieldType = GON_TYPE_NUMBER;
+    memcpy(fieldBytes + GON_TYPE_OFFSET, &fieldType, sizeof(fieldType));
+
+    Log("Resolved named palette: @%s => %d", id, rowIndex);
+}
+
+static void* __fastcall HookGonIndexByNameConst(void* gonObject, const void* fieldName)
+{
+    void* field;
+
+    field = g_origGonIndexByNameConst ? g_origGonIndexByNameConst(gonObject, fieldName) : NULL;
+
+    if (field && MsvcStringEqualsLiteral(fieldName, "palette"))
+    {
+        MaybeResolveNamedPalette(field);
+    }
+
+    return field;
+}
+
+static void* __fastcall HookGonIndexByName(void* gonObject, const void* fieldName)
+{
+    void* field;
+
+    field = g_origGonIndexByName ? g_origGonIndexByName(gonObject, fieldName) : NULL;
+
+    if (field && MsvcStringEqualsLiteral(fieldName, "palette"))
+    {
+        MaybeResolveNamedPalette(field);
+    }
+
+    return field;
 }
 
 static void FillBlankRow(uint8_t* rowStart, int32_t width, int32_t channels)
@@ -940,8 +1335,6 @@ static uint8_t* __fastcall HookImageDecodeFromMemory(void* streamRange, int32_t*
         return originalPixels;
     }
 
-    EnsurePaletteRowsLoaded();
-
     actualWidth = width ? *width : 0;
     actualHeight = height ? *height : 0;
     actualChannels = channels ? *channels : 0;
@@ -952,17 +1345,24 @@ static uint8_t* __fastcall HookImageDecodeFromMemory(void* streamRange, int32_t*
         Log("Image decode call: width=%d height=%d channels=%d requested=%d rows=%d", actualWidth, actualHeight, actualChannels, requestedChannels, g_rowCount);
     }
 
+    if (actualWidth != PALETTE_WIDTH || actualHeight < MIN_PALETTE_TEXTURE_ROWS || outputChannels <= 0 || outputChannels > 4)
+    {
+        return originalPixels;
+    }
+
+    EnsurePaletteRowsLoaded();
+
     if (g_rowCount <= 0)
     {
         return originalPixels;
     }
 
-    if (actualWidth != PALETTE_WIDTH || actualHeight != VANILLA_PALETTE_ROWS || outputChannels <= 0 || outputChannels > 4)
+    if (!EnsurePaletteRowsFinalized(actualHeight))
     {
         return originalPixels;
     }
 
-    Log("Palette-shaped image detected: width=%d height=%d channels=%d requested=%d", actualWidth, actualHeight, actualChannels, requestedChannels);
+    Log("Palette image detected: width=%d decodedHeight=%d customStart=%d channels=%d requested=%d", actualWidth, actualHeight, g_paletteBaseHeight, actualChannels, requestedChannels);
 
     if (g_requiredHeight <= actualHeight)
     {
@@ -995,18 +1395,16 @@ static uint8_t* __fastcall HookImageDecodeFromMemory(void* streamRange, int32_t*
         *height = g_requiredHeight;
     }
 
-    /*
-    * We do NOT free originalPixels here. Decoder uses CRT allocation path at RVA 0x00D44930, and the texture uploader owns the decoded buffer lifetime.
-    * Freeing it from this hook can cause an allocator mismatch or double-free crash depending on the exact call path. 
-    * Palette is loaded once, so this leak is intentionally tiny and boot-safe...
-    */
-    Log("Extended palette.png: %dx%d => %dx%d rowsAdded=%d", actualWidth, actualHeight, actualWidth, g_requiredHeight, g_rowCount);
+    Log("Extended palette.png from decoded height: %dx%d => %dx%d customStart=%d rowsAdded=%d", actualWidth, actualHeight, actualWidth, g_requiredHeight, g_paletteBaseHeight, g_rowCount);
+    
     return extendedPixels;
 }
 
 static int InstallHooks(void)
 {
     void* decodeTrampoline;
+    void* gonConstTrampoline;
+    void* gonTrampoline;
     UINT_PTR gameBase;
 
     if (InterlockedCompareExchange(&g_runtimeInstalled, 1, 0) != 0)
@@ -1032,8 +1430,10 @@ static int InstallHooks(void)
     g_gameMalloc = (fn_game_malloc)(gameBase + RVA_GAME_MALLOC);
     g_gameFree = (fn_game_free)(gameBase + RVA_GAME_FREE);
     decodeTrampoline = NULL;
+    gonConstTrampoline = NULL;
+    gonTrampoline = NULL;
 
-    Log("Installing single image decode hook at RVA 0x%X stolen=%d", RVA_IMAGE_DECODE_FROM_MEMORY, IMAGE_DECODE_HOOK_STOLEN_BYTES);
+    Log("Installing image decode hook at RVA 0x%X stolen=%d", RVA_IMAGE_DECODE_FROM_MEMORY, IMAGE_DECODE_HOOK_STOLEN_BYTES);
 
     if (!g_mj.InstallHook(RVA_IMAGE_DECODE_FROM_MEMORY, IMAGE_DECODE_HOOK_STOLEN_BYTES, (void*)HookImageDecodeFromMemory, &decodeTrampoline, 10, MOD_NAME))
     {
@@ -1043,7 +1443,26 @@ static int InstallHooks(void)
     }
 
     g_origImageDecodeFromMemory = (fn_image_decode_from_memory)decodeTrampoline;
-    Log("Installed single image decode hook! decode=0x%X trampoline=%p", RVA_IMAGE_DECODE_FROM_MEMORY, decodeTrampoline);
+
+    if (!g_mj.InstallHook(RVA_GON_INDEX_BY_NAME_CONST, GON_INDEX_HOOK_STOLEN_BYTES, (void*)HookGonIndexByNameConst, &gonConstTrampoline, 10, MOD_NAME))
+    {
+        Log("Failed to hook const GON field lookup RVA 0x%X", RVA_GON_INDEX_BY_NAME_CONST);
+        InterlockedExchange(&g_runtimeInstalled, 0);
+        return 0;
+    }
+
+    g_origGonIndexByNameConst = (fn_gon_index_by_name)gonConstTrampoline;
+
+    if (!g_mj.InstallHook(RVA_GON_INDEX_BY_NAME, GON_INDEX_HOOK_STOLEN_BYTES, (void*)HookGonIndexByName, &gonTrampoline, 10, MOD_NAME))
+    {
+        Log("Failed to hook mutable GON field lookup RVA 0x%X", RVA_GON_INDEX_BY_NAME);
+        InterlockedExchange(&g_runtimeInstalled, 0);
+        return 0;
+    }
+
+    g_origGonIndexByName = (fn_gon_index_by_name)gonTrampoline;
+    Log("Installed palette image and named GON hooks: decode=%p gonConst=%p gon=%p", decodeTrampoline, gonConstTrampoline, gonTrampoline);
+    
     return 1;
 }
 
@@ -1070,7 +1489,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 
         if (g_mj.Log)
         {
-            g_mj.Log(MOD_NAME, "Loading sibling mod palette scan build!");
+            g_mj.Log(MOD_NAME, "Loading!");
         }
 
         Initialize();

@@ -1,0 +1,19 @@
+# =================================
+# Custom color palette definitions!
+# =================================
+# PNG strip:
+# The PNG must be exactly 16 pixels wide and 1 pixel tall...
+# Paths are relative to this palette_rows.txt file...
+#   paletteID = palettes/my_palette.png
+#
+# Hex color rows:
+#   paletteID = #RRGGBB ... (16 colors)
+#
+# Recommended naming convention:
+#   myMod.paletteID = palettes/my_palette.png
+#
+# Once defined, you can use these palettes in any .gon script files by doing:
+#   palette @myMod.paletteID
+
+toxicGreen = palettes/toxic_green.png
+fairyPink = #1A0610 #321020 #4A1930 #632240 #7C2B50 #963460 #B03D70 #CA4680 #E45090 #F062A0 #F578B0 #FA8EC0 #FCA8D0 #FDC2DF #FEDCEF #FFF6FB
