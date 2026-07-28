@@ -9,7 +9,7 @@ To make a palette mod, install **MewPaletteExtender** once, then create your own
 
 Your palette mod should include a `palette_rows.txt` file and, optionally, a `palettes` folder for PNG palette strips.
 
-Here’s how the file layout should look:
+Here's how the file layout should look:
 
 ```text
 mods/
@@ -26,17 +26,24 @@ Inside `palette_rows.txt`, add one palette per line.
 You can use either **16 hex colors**:
 
 ```text
-fairy_pink@420 = #1A0610 #321020 #4A1930 #632240 #7C2B50 #963460 #B03D70 #CA4680 #E45090 #F062A0 #F578B0 #FA8EC0 #FCA8D0 #FDC2DF #FEDCEF #FFF6FB
+fairyPink = #1A0610 #321020 #4A1930 #632240 #7C2B50 #963460 #B03D70 #CA4680 #E45090 #F062A0 #F578B0 #FA8EC0 #FCA8D0 #FDC2DF #FEDCEF #FFF6FB
 ```
 
 Or a **16x1 PNG strip**:
 
 ```text
-fairy_pink@420 = palettes/fairy_pink.png
+fairyPink = palettes/fairy_pink.png
 ```
 
 PNG strips must be exactly **16 pixels wide and 1 pixel tall**. Each pixel becomes one palette color, read from left to right.
 
-Palette row IDs are assigned automatically if not specified. When assigning an explicit row for your palettes, make sure each row ID is a unique number between **256 and 1024**.
+Recommended palette naming convention:
 
-NOTE: Right now you just have to pick a number that you think is unique enough to avoid conflictions with any mods. In the future, perhaps I will update the mod so that it will dynamically avoid any potential conflictions, but this is so niche right now that I'm not going to bother. At least not until a proper in-general cat framework is complete/provided!
+```text
+myMod.paletteID = palettes/my_palette.png
+```
+
+Once defined, you can then use these palettes in any .gon script files by doing:
+```text
+palette @myMod.paletteID
+```
