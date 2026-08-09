@@ -5,9 +5,9 @@ A DLL dependency mod that allows other mods to add new custom color palettes to 
 
 # Making a Custom Palette Mod
 
-To make a palette mod, install **MewPaletteExtender** once, then create your own mod folder next to it.
+To make a palette mod, install [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369), then create your own mod folder next to it.
 
-First, please ensure that in your description.json of your mod, that you require this mod as a dependancy:
+First, please ensure that in your description.json of your mod, that you require this mod as a dependency so players know to download it:
 
 ```text
 "requirements": [
